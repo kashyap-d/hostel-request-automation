@@ -17,6 +17,32 @@ def parse_llm_output(text):
         data[key.strip().lower().replace(" ", "_")] = value.strip()
     return data
 
+def fetch_problem_statements(limit: int = 10, reg_number: str = None):
+    """
+    Fetch problem statements from the request table to use as context.
+    
+    Args:
+        limit: Number of recent problem statements to fetch (default: 10)
+        reg_number: Optional registration number to filter by specific student
+    
+    Returns:
+        List of dictionaries containing problem_statement, reg_number, student_name, and created_at
+    """
+    try:
+        query = supabase.table("request").select("problem_statement, reg_number, student_name, created_at")
+        
+        # Filter by registration number if provided
+        if reg_number:
+            query = query.eq("reg_number", reg_number)
+        
+        # Order by created_at descending (most recent first) and limit results
+        response = query.order("created_at", desc=True).limit(limit).execute()
+        
+        return response.data if response.data else []
+    except Exception as e:
+        print(f"[Error] Failed to fetch problem statements: {e}")
+        return []
+
 def insert_request(data):
     # Insert into StudentInfo if not exists
     supabase.table("studentinfo").upsert({

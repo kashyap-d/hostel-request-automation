@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from typing import TypedDict, List
-from supabase_client import parse_llm_output, insert_request
+from supabase_client import parse_llm_output, insert_request, fetch_problem_statements
 
 load_dotenv()
 
@@ -11,15 +11,31 @@ class State(TypedDict):
     problem_statement: str
     generated_response: List[AIMessage]
 
-def process_hostel_request(problem_statement: str):
+def process_hostel_request(problem_statement: str, context_limit: int = 10, use_context: bool = True):
     """Process a hostel request from problem statement to database insertion"""
     
     # Initialize LLM
     llm = ChatGroq(model="llama-3.1-8b-instant")
     
+    # Fetch previous problem statements as context
+    context_text = ""
+    if use_context:
+        print(f"[Context] Fetching last {context_limit} problem statements for context...")
+        previous_problems = fetch_problem_statements(limit=context_limit)
+        if previous_problems:
+            print(f"[Context] Found {len(previous_problems)} previous problem statements")
+            context_text = "\n\nPrevious Problem Statements (for context):\n"
+            for idx, problem in enumerate(previous_problems, 1):
+                context_text += f"{idx}. Student: {problem.get('student_name', 'N/A')} (Reg: {problem.get('reg_number', 'N/A')})\n"
+                context_text += f"   Problem: {problem.get('problem_statement', 'N/A')}\n"
+                context_text += f"   Date: {problem.get('created_at', 'N/A')}\n\n"
+        else:
+            print("[Context] No previous problem statements found")
+    
     # Create prompt for extracting details
     prompt = f"""
-    Problem Statement:
+    {context_text}
+    Current Problem Statement:
     {problem_statement}
 
     Extract the following details ONLY in the order given below.
