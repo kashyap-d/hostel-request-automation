@@ -34,19 +34,29 @@ def process_hostel_request(problem_statement: str, context_limit: int = 10, use_
     Current Problem Statement:
     {problem_statement}
 
-    Extract the following details ONLY in the order given below.
+    Extract the following details ONLY in the exact format specified below.
     Do NOT REARRANGE OR INTERCHANGE THE ORDER OF THE FIELDS.
+    Output EXACTLY in this format (one field per line):
 
-    1. Name: <name value or NULL if not provided>
-    2. Registration Number: <registration number value or NULL if not provided>
-    3. Problem Statement: <only the complaint or problem related to HOSTEL or ADMISSION issues; if none, output NULL>
+    Name: <name value or NULL if not provided>
+    Registration Number: <registration number value or NULL if not provided>
+    Problem Statement: <only the complaint or problem related to HOSTEL or ADMISSION issues; if none, output NULL>
 
-    DISREGARD ANY ADDITIONAL INFORMATION or user metadata in the Problem Statement field.
-    If the complaint is NOT related to hostel, please output NULL for Problem Statement.
+    IMPORTANT REQUIREMENTS:
+    - Use EXACTLY "Registration Number:" (not "Reg Number:", "Reg No:", etc.)
+    - Use EXACTLY "Name:" and "Problem Statement:"
+    - Each field must be on its own line
+    - Each line must have a colon (:) separating the field name from the value
+    - If a registration number is provided, extract it exactly as written (preserve numbers, letters, hyphens, etc.)
+    - DISREGARD ANY ADDITIONAL INFORMATION or user metadata in the Problem Statement field
+    - If the complaint is NOT related to hostel, output NULL for Problem Statement
+    - If any field is missing, output NULL as its value
+    - DO NOT output anything else (no explanations, no additional text)
 
-    If any field is missing, output NULL as its value.
-
-    DO NOT output anything else.
+    Example output format:
+    Name: John Doe
+    Registration Number: 2024001
+    Problem Statement: My AC is not working in room 101
     """
 
     # Get LLM response
@@ -60,13 +70,27 @@ def process_hostel_request(problem_statement: str, context_limit: int = 10, use_
     ])
 
     generated_response = response.content
+    
+    # Debug: Print raw LLM response (set DEBUG=True in environment to enable)
+    if os.getenv("DEBUG", "False").lower() == "true":
+        print(f"\n[DEBUG] Raw LLM Response:\n{generated_response}\n")
 
     # Parse the response
+    parsed_data = None
     try:
         parsed_data = parse_llm_output(generated_response)
         
+        # Validate that we got some data
+        if not parsed_data:
+            print("\n Error: Failed to parse LLM response - no data extracted")
+            print(f"\n[DEBUG] Raw LLM output:")
+            print("-" * 60)
+            print(generated_response)
+            print("-" * 60)
+            return False
+        
         # Display parsed data in a clean format
-        print("\n📋 Extracted Information:")
+        print("\n Extracted Information:")
         print("-" * 60)
         print(f"  Name:                {parsed_data.get('name', 'N/A')}")
         print(f"  Registration Number: {parsed_data.get('registration_number', 'N/A')}")
@@ -74,42 +98,62 @@ def process_hostel_request(problem_statement: str, context_limit: int = 10, use_
         print("-" * 60)
         
         # Validate required fields
-        if parsed_data.get("name") == "NULL" or parsed_data.get("registration_number") == "NULL":
-            print("\n❌ Error: Missing required fields (name or registration number)")
+        name = parsed_data.get("name", "").strip()
+        reg_number = parsed_data.get("registration_number", "").strip()
+        problem = parsed_data.get("problem_statement", "").strip()
+        
+        if not name or name.upper() == "NULL":
+            print("\n Error: Missing or invalid name field")
+            print(f"[DEBUG] Parsed name value: '{name}'")
             return False
             
-        if parsed_data.get("problem_statement") == "NULL":
-            print("\n⚠️  Warning: Problem statement is not hostel-related")
+        if not reg_number or reg_number.upper() == "NULL":
+            print("\n Error: Missing or invalid registration number field")
+            print(f"[DEBUG] Parsed registration_number value: '{reg_number}'")
+            print(f"[DEBUG] All parsed keys: {list(parsed_data.keys())}")
+            return False
+            
+        if not problem or problem.upper() == "NULL":
+            print("\n  Warning: Problem statement is not hostel-related or is missing")
             return False
         
         # Insert into database
         insert_request(parsed_data)
-        print("\n✅ Success: Request processed and stored in database")
+        print("\n Success: Request processed and stored in database")
         print("="*60)
         return True
         
     except Exception as e:
-        print(f"\n❌ Error: Failed to process request: {e}")
+        print(f"\n Error: Failed to process request: {e}")
+        print(f"\n[DEBUG] Raw LLM output that caused the error:")
+        print("-" * 60)
+        print(generated_response)
+        print("-" * 60)
+        if parsed_data:
+            print(f"\n[DEBUG] Parsed data: {parsed_data}")
+        import traceback
+        print(f"\n[DEBUG] Traceback:")
+        traceback.print_exc()
         print("="*60)
         return False
 
 def main():
     """Main application loop"""
     print("\n" + "="*60)
-    print("  🏠 Hostel Request Automation System")
+    print(" Hostel Request Automation System")
     print("="*60)
     print("  Enter 'quit' to exit\n")
     
     while True:
         try:
-            user_input = input("📝 Enter complaint and user details:\n> ")
+            user_input = input("Enter complaint and user details:\n> ")
             
             if user_input.lower() in ['quit', 'exit', 'q']:
                 print("\n👋 Goodbye!\n")
                 break
                 
             if not user_input.strip():
-                print("⚠️  Please enter some details.\n")
+                print("Please enter some details.\n")
                 continue
                 
             success = process_hostel_request(user_input)
@@ -123,7 +167,7 @@ def main():
             print("\n\n👋 Goodbye!\n")
             break
         except Exception as e:
-            print(f"\n❌ Unexpected error: {e}\n")
+            print(f"\n Unexpected error: {e}\n")
 
 if __name__ == "__main__":
     main()
