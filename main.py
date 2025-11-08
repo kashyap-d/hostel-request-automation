@@ -89,9 +89,9 @@ def main():
             success = process_hostel_request(user_input)
             
             if success:
-                print("✅ Request processed successfully!\n")
+                print("Request processed successfully!\n")
             else:
-                print("❌ Failed to process request. Please try again.\n")
+                print("Failed to process request. Please try again.\n")
                 
         except KeyboardInterrupt:
             print("\nGoodbye!")
