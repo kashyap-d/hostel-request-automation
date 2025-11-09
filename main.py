@@ -120,16 +120,37 @@ def main():
     print("="*60)
     print("Enter 'quit' anytime to exit.\n")
 
+    # Initialize LLM once here (for summarization)
+    llm = ChatGroq(model="llama-3.1-8b-instant")
+
     name = input("Enter your name: ").strip()
     reg_number = input("Enter your registration number: ").strip()
 
-    # Check if user exists
-    previous_problems = fetch_problem_statements()
-    existing_user = any(p.get("reg_number") == reg_number for p in previous_problems)
+    # Check if user exists in DB
+    previous_problems_all = fetch_problem_statements()
+    existing_user = any(p.get("reg_number") == reg_number for p in previous_problems_all)
 
     if existing_user:
         print(f"\n👋 Welcome back, {name}! It’s great to see you again.")
-        print("I’ve reviewed your previous requests — let's continue.\n")
+
+        # Fetch previous problems for this user
+        user_problems = fetch_problem_statements(reg_number=reg_number, limit=5)
+
+        if user_problems:
+            print("\n📜 Your recent issues:")
+            print("-" * 60)
+            for idx, p in enumerate(user_problems, 1):
+                print(f"{idx}. {p.get('problem_statement', 'N/A')}  ({p.get('created_at', 'Unknown date')})")
+            print("-" * 60)
+
+            # Generate a short summary of their past complaints
+            summary = summarize_previous_problems(reg_number, llm)
+            print(f"\n🧾 Summary of your previous problems:\n➡️ {summary}\n")
+        else:
+            print("\nIt seems we couldn’t find your past records.\n")
+
+        print("Let's continue — what would you like help with today?\n")
+
     else:
         print(f"\n👋 Hello {name}! Welcome to the Hostel Helpdesk System.")
         print("It looks like this is your first time here.\n")
