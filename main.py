@@ -33,36 +33,36 @@ def summarize_previous_problems(reg_number: str, llm, context_limit: int = 10) -
 
 
 # --- Core Function ---
-def process_hostel_request(problem_statement: str, reg_number: str, name: str, context_limit: int = 10, use_context: bool = True):
-    """Process a hostel request with personalized context awareness."""
+def process_hostel_request(name: str, reg_number: str, problem_statement: str, context_limit: int = 10, use_context: bool = True):
+    """Process a hostel request given user details and a problem statement"""
 
+    # Initialize LLM
     llm = ChatGroq(model="llama-3.1-8b-instant")
 
-    # Fetch previous problem statements for this specific user
+    # Fetch previous problem statements as context
     context_text = ""
     if use_context:
-        previous_problems = fetch_problem_statements(reg_number=reg_number, limit=context_limit)
+        previous_problems = fetch_problem_statements(limit=context_limit)
         if previous_problems:
-            summary = summarize_previous_problems(reg_number, llm, context_limit)
-            context_text = f"Student: {name} ({reg_number})\nPrevious issues summary:\n{summary}\n"
+            context_text = "\n\nPrevious Problem Statements (for context):\n"
+            for idx, problem in enumerate(previous_problems, 1):
+                context_text += f"{idx}. Student: {problem.get('student_name', 'N/A')} (Reg: {problem.get('reg_number', 'N/A')})\n"
+                context_text += f"   Problem: {problem.get('problem_statement', 'N/A')}\n"
+                context_text += f"   Date: {problem.get('created_at', 'N/A')}\n\n"
 
-    # Construct the extraction prompt
+    # Create simplified prompt (no name/reg number extraction)
     prompt = f"""
     {context_text}
-
-    Current Problem Statement:
+    Current Problem Description:
     {problem_statement}
 
-    Extract the following details ONLY in the exact format below:
+    Task:
+    Determine if this complaint is related to HOSTEL or ADMISSION.
+    If it is, return the problem statement cleaned up (grammar corrected, remove unnecessary phrases).
+    If not, output "NULL".
 
-    Name: <name value or NULL if not provided>
-    Registration Number: <registration number value or NULL if not provided>
-    Problem Statement: <only the complaint or problem related to HOSTEL or ADMISSION issues; if none, output NULL>
-
-    IMPORTANT:
-    - Use exactly these field names.
-    - Each field on a new line.
-    - If not hostel-related, Problem Statement should be NULL.
+    Output format:
+    Problem Statement: <cleaned problem statement or NULL>
     """
 
     print("\n" + "="*60)
@@ -70,106 +70,85 @@ def process_hostel_request(problem_statement: str, reg_number: str, name: str, c
     print("="*60)
 
     response = llm.invoke([
-        SystemMessage(content="You are an excellent details retriever."),
+        SystemMessage(content="You are an excellent problem classifier and cleaner."),
         HumanMessage(content=prompt)
     ])
 
     generated_response = response.content
 
-    parsed_data = None
+    if os.getenv("DEBUG", "False").lower() == "true":
+        print(f"\n[DEBUG] Raw LLM Response:\n{generated_response}\n")
+
     try:
         parsed_data = parse_llm_output(generated_response)
-        if not parsed_data:
-            print("\n❌ Error: Failed to parse LLM output.")
-            return False
 
-        # Display parsed data
-        print("\nExtracted Information:")
-        print("-" * 60)
-        print(f"  Name:                {parsed_data.get('name', 'N/A')}")
-        print(f"  Registration Number: {parsed_data.get('registration_number', 'N/A')}")
-        print(f"  Problem Statement:   {parsed_data.get('problem_statement', 'N/A')}")
-        print("-" * 60)
-
-        # Validate essential fields
-        name = parsed_data.get("name", "").strip()
-        reg_number = parsed_data.get("registration_number", "").strip()
         problem = parsed_data.get("problem_statement", "").strip()
 
-        if not name or name.upper() == "NULL":
-            print("\n⚠️ Missing name field.")
-            return False
-        if not reg_number or reg_number.upper() == "NULL":
-            print("\n⚠️ Missing registration number.")
-            return False
+        print("\n Extracted Information:")
+        print("-" * 60)
+        print(f"  Name:                {name}")
+        print(f"  Registration Number: {reg_number}")
+        print(f"  Problem Statement:   {problem}")
+        print("-" * 60)
+
         if not problem or problem.upper() == "NULL":
-            print("\n⚠️ Problem statement not hostel-related or missing.")
+            print("\n⚠️  Warning: Problem statement is not hostel-related or is missing.")
             return False
 
-        # Store in database
-        insert_request(parsed_data)
-        print("\n✅ Success: Request stored in database.")
-        print("="*60)
+        # Insert into database
+        insert_request({
+            "name": name,
+            "registration_number": reg_number,
+            "problem_statement": problem
+        })
+
+        print("\n✅ Success: Request processed and stored in database.")
+        print("=" * 60)
         return True
 
     except Exception as e:
-        print(f"\n❌ Error processing request: {e}")
+        print(f"\n❌ Error: Failed to process request: {e}")
+        import traceback
+        traceback.print_exc()
+        print("=" * 60)
         return False
 
 
-# --- Main interactive loop ---
 def main():
     print("\n" + "="*60)
     print(" Hostel Request Automation System")
     print("="*60)
     print("Enter 'quit' anytime to exit.\n")
 
-    llm = ChatGroq(model="llama-3.1-8b-instant")
+    name = input("Enter your name: ").strip()
+    reg_number = input("Enter your registration number: ").strip()
+
+    # Check if user exists
+    previous_problems = fetch_problem_statements()
+    existing_user = any(p.get("reg_number") == reg_number for p in previous_problems)
+
+    if existing_user:
+        print(f"\n👋 Welcome back, {name}! It’s great to see you again.")
+        print("I’ve reviewed your previous requests — let's continue.\n")
+    else:
+        print(f"\n👋 Hello {name}! Welcome to the Hostel Helpdesk System.")
+        print("It looks like this is your first time here.\n")
 
     while True:
-        try:
-            # Step 1: Ask for user name and registration number
-            name = input("Enter your name: ").strip()
-            if name.lower() in ['quit', 'exit', 'q']:
-                print("\n👋 Goodbye!\n")
-                break
+        user_problem = input("Please describe your current problem:\n> ")
 
-            reg_number = input("Enter your registration number: ").strip()
-            if reg_number.lower() in ['quit', 'exit', 'q']:
-                print("\n👋 Goodbye!\n")
-                break
-
-            # Step 2: Check if user exists in DB
-            previous_problems = fetch_problem_statements(reg_number=reg_number, limit=5)
-            if not previous_problems:
-                # New user greeting
-                print(f"\n👋 Hello {name}! Welcome to the Hostel Helpdesk System.")
-                print("It looks like this is your first time here.\n")
-            else:
-                # Returning user greeting
-                print(f"\n👋 Welcome back, {name}!")
-                summary = summarize_previous_problems(reg_number, llm, context_limit=5)
-                print("Here's a quick summary of your previous complaints:")
-                print(f"📝 {summary}\n")
-
-            # Step 3: Ask for problem statement
-            problem_statement = input("Please describe your current problem:\n> ").strip()
-            if not problem_statement:
-                print("⚠️ Please enter a valid problem statement.\n")
-                continue
-
-            # Step 4: Process and store
-            success = process_hostel_request(problem_statement, reg_number, name)
-            if success:
-                print(f"\n✅ Thank you, {name}. Your issue has been recorded.\n")
-            else:
-                print(f"\n⚠️ Sorry {name}, there was an issue processing your request.\n")
-
-        except KeyboardInterrupt:
-            print("\n\n👋 Goodbye!\n")
+        if user_problem.lower() in ['quit', 'exit', 'q']:
+            print("\n👋 Goodbye!\n")
             break
-        except Exception as e:
-            print(f"\nUnexpected error: {e}\n")
+
+        if not user_problem.strip():
+            print("Please enter some details.\n")
+            continue
+
+        success = process_hostel_request(name, reg_number, user_problem)
+
+        print("\n")
+
 
 
 if __name__ == "__main__":
