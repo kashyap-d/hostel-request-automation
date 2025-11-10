@@ -5,3 +5,4 @@ langchain_core
 langchain
 langgraph
 typing
+python-telegram-bot
