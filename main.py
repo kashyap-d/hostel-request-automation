@@ -1,24 +1,31 @@
-import os
+from dataclasses import dataclass
+from typing import Literal, Optional
+
 from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from typing import TypedDict, List
-from supabase_client import parse_llm_output, insert_request, fetch_problem_statements
+
+from classifier import Ticket, classify_complaint, make_llm
+from supabase_client import fetch_problem_statements, format_history, insert_request, summaries_from
 
 load_dotenv()
 
-class State(TypedDict):
-    problem_statement: str
-    generated_response: List[AIMessage]
+CONTEXT_LIMIT = 5
+
+
+@dataclass
+class RequestResult:
+    status: Literal["recorded", "rejected", "error"]
+    ticket: Optional[Ticket] = None
+
 
 # --- Helper function: summarize previous problems ---
-def summarize_previous_problems(reg_number: str, llm, context_limit: int = 10) -> str:
-    """Fetch and summarize a user's previous problem statements."""
-    previous_problems = fetch_problem_statements(reg_number=reg_number, limit=context_limit)
-    if not previous_problems:
+def summarize_previous_problems(previous_summaries, llm) -> str:
+    """Summarize one student's previous problem statements."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    if not previous_summaries:
         return "No previous problems found."
 
-    joined = "\n".join([f"- {p.get('problem_statement', '')}" for p in previous_problems if p.get('problem_statement')])
+    joined = "\n".join(f"- {s}" for s in previous_summaries)
     summary_prompt = f"""
     Summarize the key issues and recurring themes in the following list of student complaints.
     Keep the summary short (max 3 lines).
@@ -33,85 +40,36 @@ def summarize_previous_problems(reg_number: str, llm, context_limit: int = 10) -
 
 
 # --- Core Function ---
-def process_hostel_request(name: str, reg_number: str, problem_statement: str, context_limit: int = 10, use_context: bool = True):
-    """Process a hostel request given user details and a problem statement"""
+def process_hostel_request(name: str, reg_number: str, problem_statement: str, llm=None) -> RequestResult:
+    """Classify a complaint and store it if it is hostel-related."""
+    llm = llm or make_llm()
+    previous = summaries_from(fetch_problem_statements(reg_number, limit=CONTEXT_LIMIT))
 
-    # Initialize LLM
-    llm = ChatGroq(model="llama-3.1-8b-instant")
-
-    # Fetch previous problem statements as context
-    context_text = ""
-    if use_context:
-        previous_problems = fetch_problem_statements(limit=context_limit)
-        if previous_problems:
-            context_text = "\n\nPrevious Problem Statements (for context):\n"
-            for idx, problem in enumerate(previous_problems, 1):
-                context_text += f"{idx}. Student: {problem.get('student_name', 'N/A')} (Reg: {problem.get('reg_number', 'N/A')})\n"
-                context_text += f"   Problem: {problem.get('problem_statement', 'N/A')}\n"
-                context_text += f"   Date: {problem.get('created_at', 'N/A')}\n\n"
-
-    # Create simplified prompt (no name/reg number extraction)
-    prompt = f"""
-    {context_text}
-    Current Problem Description:
-    {problem_statement}
-
-    Task:
-    Determine if this complaint is related to HOSTEL or ADMISSION.
-    If it is, return the problem statement cleaned up (grammar corrected, remove unnecessary phrases).
-    If not, output "NULL".
-
-    Output format:
-    Problem Statement: <cleaned problem statement or NULL>
-    """
-
-    print("\n" + "="*60)
-    print("Processing request...")
-    print("="*60)
-
-    response = llm.invoke([
-        SystemMessage(content="You are an excellent problem classifier and cleaner."),
-        HumanMessage(content=prompt)
-    ])
-
-    generated_response = response.content
-
-    if os.getenv("DEBUG", "False").lower() == "true":
-        print(f"\n[DEBUG] Raw LLM Response:\n{generated_response}\n")
+    ticket = classify_complaint(problem_statement, previous, llm)
+    if ticket is None:
+        return RequestResult("error")
+    if not ticket.is_hostel_related:
+        return RequestResult("rejected", ticket)
 
     try:
-        parsed_data = parse_llm_output(generated_response)
-
-        problem = parsed_data.get("problem_statement", "").strip()
-
-        print("\n Extracted Information:")
-        print("-" * 60)
-        print(f"  Name:                {name}")
-        print(f"  Registration Number: {reg_number}")
-        print(f"  Problem Statement:   {problem}")
-        print("-" * 60)
-
-        if not problem or problem.upper() == "NULL":
-            print("\n⚠️  Warning: Problem statement is not hostel-related or is missing.")
-            return False
-
-        # Insert into database
-        insert_request({
-            "name": name,
-            "registration_number": reg_number,
-            "problem_statement": problem
-        })
-
-        print("\n✅ Success: Request processed and stored in database.")
-        print("=" * 60)
-        return True
-
+        insert_request(name, reg_number, ticket)
     except Exception as e:
-        print(f"\n❌ Error: Failed to process request: {e}")
-        import traceback
-        traceback.print_exc()
-        print("=" * 60)
-        return False
+        print(f"[Error] Failed to store request: {type(e).__name__}")
+        return RequestResult("error", ticket)
+    return RequestResult("recorded", ticket)
+
+
+def describe_ticket(ticket: Ticket) -> str:
+    """Human-readable confirmation of what was stored."""
+    lines = [
+        f"Problem:  {ticket.summary}",
+        f"Category: {ticket.category}",
+        f"Urgency:  {ticket.urgency}",
+        f"Location: {ticket.location or 'not given'}",
+    ]
+    if ticket.is_repeat:
+        lines.append("Note:     you have reported this before")
+    return "\n".join(lines)
 
 
 def main():
@@ -120,37 +78,23 @@ def main():
     print("="*60)
     print("Enter 'quit' anytime to exit.\n")
 
-    # Initialize LLM once here (for summarization)
-    llm = ChatGroq(model="llama-3.1-8b-instant")
+    llm = make_llm()
 
     name = input("Enter your name: ").strip()
     reg_number = input("Enter your registration number: ").strip()
 
-    # Check if user exists in DB
-    previous_problems_all = fetch_problem_statements()
-    existing_user = any(p.get("reg_number") == reg_number for p in previous_problems_all)
+    user_problems = fetch_problem_statements(reg_number, limit=CONTEXT_LIMIT)
 
-    if existing_user:
+    if user_problems:
         print(f"\n👋 Welcome back, {name}! It’s great to see you again.")
+        print("\n📜 Your recent issues:")
+        print("-" * 60)
+        print(format_history(user_problems))
+        print("-" * 60)
 
-        # Fetch previous problems for this user
-        user_problems = fetch_problem_statements(reg_number=reg_number, limit=5)
-
-        if user_problems:
-            print("\n📜 Your recent issues:")
-            print("-" * 60)
-            for idx, p in enumerate(user_problems, 1):
-                print(f"{idx}. {p.get('problem_statement', 'N/A')}  ({p.get('created_at', 'Unknown date')})")
-            print("-" * 60)
-
-            # Generate a short summary of their past complaints
-            summary = summarize_previous_problems(reg_number, llm)
-            print(f"\n🧾 Summary of your previous problems:\n➡️ {summary}\n")
-        else:
-            print("\nIt seems we couldn’t find your past records.\n")
-
+        summary = summarize_previous_problems(summaries_from(user_problems), llm)
+        print(f"\n🧾 Summary of your previous problems:\n➡️ {summary}\n")
         print("Let's continue — what would you like help with today?\n")
-
     else:
         print(f"\n👋 Hello {name}! Welcome to the Hostel Helpdesk System.")
         print("It looks like this is your first time here.\n")
@@ -166,13 +110,18 @@ def main():
             print("Please enter some details.\n")
             continue
 
-        success = process_hostel_request(name, reg_number, user_problem)
+        print("\nProcessing request...")
+        result = process_hostel_request(name, reg_number, user_problem, llm)
 
+        if result.status == "recorded":
+            print("\n✅ Request recorded:")
+            print(describe_ticket(result.ticket))
+        elif result.status == "rejected":
+            print("\n⚠️  This doesn't look like a hostel or admission problem, so it was not recorded.")
+        else:
+            print("\n❌ Something went wrong. Please try again.")
         print("\n")
 
 
-def run_chatbot():
-    main()
-    
 if __name__ == "__main__":
     main()

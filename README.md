@@ -1,105 +1,86 @@
-# Hostel Request Automation System
+# Hostel Request Automation
 
-An automated system for processing hostel-related complaints using AI and storing them in Supabase.
+A Telegram and command-line helpdesk bot that turns students' free-text hostel complaints into structured, validated tickets stored in Supabase Postgres.
 
-## Features
+A message like *"bhai room 210 ka fan kaam nahi kar raha"* should become a ticket like:
 
-- AI-powered extraction of student details and problem statements
-- Automatic validation of hostel-related complaints
-- Database storage using Supabase
-- Interactive command-line interface
-- Telegram Bot integration for user-friendly complaint submission
+```text
+Problem:  The fan in room 210 is not working.
+Category: electrical
+Urgency:  medium
+Location: room 210
+```
+
+Off-topic messages ("When is the DBMS assignment due?") are rejected and not stored.
+
+## How it works
+
+```text
+student message (Telegram or CLI)
+  -> fetch this student's own recent requests        (supabase_client.py)
+  -> LLM fills the Ticket schema via tool calling      (classifier.py)
+  -> Pydantic validates the answer; one retry on failure
+  -> rejected  -> tell the student, store nothing
+     recorded  -> insert into Postgres, show the student what was saved
+     error     -> tell the student to try again
+```
+
+Design choices:
+
+- **Structured output instead of text parsing.** The model must call a `Ticket` tool whose fields are typed (`category` and `urgency` are fixed enums). Pydantic validates the result, and a hostel ticket without a category, urgency or summary is rejected. The database has matching `CHECK` constraints.
+- **The model never writes to the database.** It only proposes a ticket; application code decides whether to store it.
+- **Only the student's own history is used as context.** Other students' names, registration numbers and complaints are never sent to the model or shown to a user.
+- **Complaint text is treated as data.** It is wrapped in `<complaint>` tags, and the prompt tells the model to ignore any instructions inside it. The eval set includes prompt-injection attempts to check this.
+- **Locations are never guessed.** If the student doesn't state a room or block, `location` stays empty. The evals measure this as "no invented location".
+- **Rejection and failure are different outcomes.** The student is told whether their message was off-topic or whether something broke.
+
+## Evaluation
+
+`evals/complaints.jsonl` holds 55 hand-labelled messages: complaints in every category, admission queries, off-topic messages, prompt-injection attempts, Hinglish, and repeat complaints with history. Where a label is reasonably debatable (is a broken geyser plumbing or electrical?), the case lists every acceptable answer.
+
+```bash
+python -m evals.run_eval                                   # default model
+python -m evals.run_eval --model llama-3.3-70b-versatile   # compare another Groq model
+```
+
+The runner reports accept/reject accuracy, precision and recall, category, urgency and location accuracy, the invented-location rate, prompt-injection resistance, repeat detection, and p50/p95 latency. It lists every failing case and saves a markdown report in `evals/results/`.
+
+The labels are synthetic. Before relying on the numbers, add real (anonymised) complaints.
 
 ## Setup
 
-1. Install dependencies:
+1. Install dependencies (Python 3.10+):
 
    ```bash
-   pip install -r requirements.txt
+   pip install -r requirements-dev.txt
    ```
 
-2. Environment variables:
+2. Copy `.env.example` to `.env` and fill in `GROQ_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` and `TELEGRAM_TOKEN`.
 
-   - Copy `env.example` to `.env`:
-     ```bash
-     copy env.example .env
-     ```
-   - Edit `.env` and set the required keys:
+3. Run `migrations/001_structured_tickets.sql` in the Supabase SQL editor. It creates the tables if they don't exist and adds the ticket columns to existing ones, so it's safe to run more than once.
 
-     ```
-     GROQ_API_KEY=your_groq_api_key_here
-     SUPABASE_URL=your_supabase_url_here
-     SUPABASE_SERVICE_KEY=your_supabase_service_key_here
-     TELEGRAM_TOKEN=your_telegram_bot_token_here
-     ```
-
-3. Database setup:
-
-   - Ensure your Supabase database has the required tables:
-     - `studentinfo` table with columns: `reg_number`, `name`, `hostel_block`
-     - `request` table with columns: `reg_number`, `student_name`, `problem_statement`
-
-## Telegram — Step-by-step setup
-
-1. Create a Telegram Bot
-   - Open Telegram.
-   - Search for @BotFather.
-   - Send the command:
-     ```
-     /newbot
-     ```
-   - Follow the prompts to choose a name and username.
-   - BotFather will return a Bot Token like:
-     ```
-     123456789:ABCdefGhIJKlmNoPQrsTUVwxYZ
-     ```
-   - Add that token to your `.env` as `TELEGRAM_TOKEN`.
-
-2. Run the bot locally
-   - Make sure `.env` is populated and dependencies installed.
-   - Start the Telegram wrapper:
-     ```bash
-     python telegram_wrapper.py
-     ```
-   - The bot will run in polling mode and accept user complaints.
+4. Create a Telegram bot with [@BotFather](https://t.me/BotFather) (`/newbot`) and put its token in `.env`.
 
 ## Usage
 
-Run the main application:
-
 ```bash
-python main.py
+python telegram_wrapper.py   # Telegram bot (polling)
+python main.py               # command-line version
+pytest -q                    # unit tests; no API keys needed
 ```
 
-Or run the Telegram bot:
+## Project layout
 
-```bash
-python telegram_wrapper.py
+```text
+classifier.py         Ticket schema, prompt, LLM call with validation and retry
+main.py               request processing and the command-line interface
+telegram_wrapper.py   Telegram conversation flow
+supabase_client.py    database access, always scoped to one student
+migrations/           database schema
+evals/                labelled cases and the eval runner
+tests/                unit tests with a fake LLM
 ```
 
-Enter student complaints in the format:
+## Contributors
 
-```
-Name: John Doe
-Registration Number: 2024001
-Problem: My AC is not working in room 101
-```
-
-The system will extract the details, validate it's hostel-related, and store it in the database.
-
-## Files
-
-- `main.py` - Main application combining LLM processing and database operations
-- `supabase_client.py` - Database operations and data parsing
-- `telegram_wrapper.py` - Telegram bot interface
-- `prototype.py` - Original LLM processing prototype
-- `requirements.txt` - Python dependencies
-- `env.example` - Environment variables template
-
-## Example Input
-
-```
-Name: Alice Smith
-Registration Number: 2024002
-Problem: The WiFi is very slow in my hostel room
-```
+Built by [kashyap-d](https://github.com/kashyap-d), [akshat652256](https://github.com/akshat652256) and [edwinsajith](https://github.com/edwinsajith).

@@ -1,178 +1,81 @@
-from supabase import create_client, Client
-from dotenv import load_dotenv
 import os
-import re
+from typing import List
+
+from dotenv import load_dotenv
 
 load_dotenv()
 
-url: str = "https://ecnyhehyimblbopayjys.supabase.co"  # your Supabase URL
-key: str = os.getenv("SUPABASE_SERVICE_KEY")  # or "SUPABASE_ANON_KEY" depending on which you want to use
+_client = None
 
-supabase: Client = create_client(url, key)
 
-def parse_llm_output(text):
-    """
-    Parse LLM output to extract name, registration number, and problem statement.
-    Handles various formats including numbered lists and different key variations.
-    """
-    
-    lines = text.strip().split('\n')
-    data = {}
-    
-    # Key mapping for variations (normalized to standard keys)
-    key_mappings = {
-        'name': 'name',
-        'registration_number': 'registration_number',
-        'registration_no': 'registration_number',
-        'reg_number': 'registration_number',
-        'reg_no': 'registration_number',
-        'problem_statement': 'problem_statement',
-        'problem': 'problem_statement',
-    }
-    
-    for line in lines:
-        # Skip empty lines
-        if not line.strip():
-            continue
-            
-        # Remove numbered list prefixes (e.g., "1. ", "2. ", etc.)
-        line = re.sub(r'^\d+\.\s*', '', line.strip())
-        
-        # Skip lines that don't contain a colon
-        if ':' not in line:
-            continue
-        
-        try:
-            # Split on first colon only
-            parts = line.split(':', 1)
-            if len(parts) != 2:
-                continue
-                
-            key_raw = parts[0].strip()
-            value = parts[1].strip()
-            
-            # Normalize key: lowercase, remove special chars, replace spaces with underscores
-            key_normalized = re.sub(r'[^\w\s]', '', key_raw.lower())
-            key_normalized = re.sub(r'\s+', '_', key_normalized)
-            
-            # Remove trailing underscores and numbers (from numbered lists)
-            key_normalized = key_normalized.strip('_0123456789')
-            
-            # Map to standard key names
-            if key_normalized in key_mappings:
-                standard_key = key_mappings[key_normalized]
-            else:
-                # Try partial matching for variations
-                if 'name' in key_normalized and 'registration' not in key_normalized:
-                    standard_key = 'name'
-                elif 'registration' in key_normalized or ('reg' in key_normalized and 'number' in key_normalized):
-                    standard_key = 'registration_number'
-                elif 'problem' in key_normalized or 'statement' in key_normalized:
-                    standard_key = 'problem_statement'
-                else:
-                    # Use normalized key as fallback
-                    standard_key = key_normalized
-            
-            data[standard_key] = value
-            
-        except Exception as e:
-            # Skip lines that cause errors
-            continue
-    
-    return data
+def get_client():
+    """Create the Supabase client on first use, so importing this module needs no credentials."""
+    global _client
+    if _client is None:
+        from supabase import create_client
 
-def fetch_problem_statements(limit: int = 10, reg_number: str = None):
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_SERVICE_KEY")
+        if not url or not key:
+            raise RuntimeError("Set SUPABASE_URL and SUPABASE_SERVICE_KEY in .env")
+        _client = create_client(url, key)
+    return _client
+
+
+def fetch_problem_statements(reg_number: str, limit: int = 10) -> List[dict]:
     """
-    Fetch problem statements from the request table to use as context.
-    
-    Args:
-        limit: Number of recent problem statements to fetch (default: 10)
-        reg_number: Optional registration number to filter by specific student
-    
-    Returns:
-        List of dictionaries containing problem_statement, reg_number, student_name, and created_at
+    Fetch one student's most recent requests, newest first.
+
+    Always scoped to a single registration number: other students' complaints
+    are never shown to a user or sent to the LLM.
     """
     try:
-        query = supabase.table("request").select("problem_statement, reg_number, student_name, created_at")
-        
-        # Filter by registration number if provided
-        if reg_number:
-            query = query.eq("reg_number", reg_number)
-        
-        # Order by created_at descending (most recent first) and limit results
-        response = query.order("created_at", desc=True).limit(limit).execute()
-        
-        return response.data if response.data else []
+        response = (
+            get_client()
+            .table("request")
+            .select("problem_statement, category, urgency, created_at")
+            .eq("reg_number", reg_number)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return response.data or []
     except Exception as e:
-        print(f"[Error] Failed to fetch problem statements: {e}")
+        print(f"[Error] Failed to fetch problem statements: {type(e).__name__}")
         return []
 
-def insert_request(data):
-    # Insert into StudentInfo if not exists
-    supabase.table("studentinfo").upsert({
-        "reg_number": data["registration_number"],
-        "name": data["name"],
-        "hostel_block": None  # set this if available
+
+def insert_request(name: str, reg_number: str, ticket) -> None:
+    """Store a validated ticket. Raises if the database rejects the write."""
+    client = get_client()
+
+    # Insert into StudentInfo if not exists. hostel_block is deliberately omitted
+    # so an upsert never wipes a block that was already recorded.
+    client.table("studentinfo").upsert({
+        "reg_number": reg_number,
+        "name": name,
     }).execute()
 
-    # Insert into Request table
-    supabase.table("request").insert({
-        "reg_number": data["registration_number"],
-        "student_name": data["name"],
-        "problem_statement": data["problem_statement"],
+    client.table("request").insert({
+        "reg_number": reg_number,
+        "student_name": name,
+        "problem_statement": ticket.summary,
+        "category": ticket.category,
+        "urgency": ticket.urgency,
+        "location": ticket.location,
+        "is_repeat": ticket.is_repeat,
     }).execute()
 
-if __name__ == "__main__":
-    # Test various formats
-    test_cases = [
-        # Standard format
-        """
-        Name: xyz
-        Registration Number: 123
-        Problem Statement: my ac is not working
-        """,
-        # Numbered list format
-        """
-        1. Name: John Doe
-        2. Registration Number: 2024001
-        3. Problem Statement: AC not working
-        """,
-        # With variations in key names
-        """
-        Name: Alice Smith
-        Reg Number: 2024002
-        Problem Statement: WiFi is slow
-        """,
-        # With extra whitespace
-        """
-        Name:   Bob Johnson   
-        Registration Number:   2024003
-        Problem Statement:   Water leak in room
-        """,
-        # Missing colon space
-        """
-        Name:Charlie Brown
-        Registration Number:2024004
-        Problem Statement:Broken window
-        """
-    ]
-    
-    print("Testing parse_llm_output with various formats:\n")
-    for i, llm_response in enumerate(test_cases, 1):
-        print(f"Test Case {i}:")
-        print("-" * 60)
-        parsed_data = parse_llm_output(llm_response)
-        print(f"Parsed data: {parsed_data}")
-        print(f"Name: {parsed_data.get('name', 'MISSING')}")
-        print(f"Registration Number: {parsed_data.get('registration_number', 'MISSING')}")
-        print(f"Problem Statement: {parsed_data.get('problem_statement', 'MISSING')}")
-        print()
-    
-    # Test with actual insert (commented out to avoid database writes during testing)
-    # llm_response = """
-    #     Name: xyz
-    #     Registration Number: 123
-    #     Problem Statement: my ac is not working
-    # """
-    # parsed_data = parse_llm_output(llm_response)
-    # insert_request(parsed_data)
+
+def summaries_from(rows: List[dict]) -> List[str]:
+    """Extract non-empty problem statements from request rows."""
+    return [r["problem_statement"] for r in rows if r.get("problem_statement")]
+
+
+def format_history(rows: List[dict]) -> str:
+    """Render a student's past requests as a numbered list."""
+    lines = []
+    for idx, r in enumerate(rows, 1):
+        label = f"[{r['category']}] " if r.get("category") else ""
+        lines.append(f"{idx}. {label}{r.get('problem_statement', 'N/A')}  ({r.get('created_at', 'Unknown date')})")
+    return "\n".join(lines)

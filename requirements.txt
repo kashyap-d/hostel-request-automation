@@ -1,8 +1,6 @@
-supabase
-dotenv
-langchain_groq
-langchain_core
-langchain
-langgraph
-typing
-python-telegram-bot
+langchain-core>=1.7
+langchain-groq>=1.1
+pydantic>=2.7
+python-dotenv>=1.0
+python-telegram-bot>=22.0
+supabase>=2.33
