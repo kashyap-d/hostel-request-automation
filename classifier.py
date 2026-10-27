@@ -90,10 +90,13 @@ def make_llm(model: Optional[str] = None):
     """Create the Groq chat model. Imported lazily so tests run without the SDK configured."""
     from langchain_groq import ChatGroq
 
-    return ChatGroq(model=model or os.getenv("GROQ_MODEL", DEFAULT_MODEL), temperature=0)
+    # `or` rather than a getenv default: an empty GROQ_MODEL= line in .env must still mean the default.
+    return ChatGroq(model=model or os.getenv("GROQ_MODEL") or DEFAULT_MODEL, temperature=0)
 
 
-def classify_complaint(complaint: str, previous_summaries: List[str], llm) -> Optional[Ticket]:
+def classify_complaint(
+    complaint: str, previous_summaries: List[str], llm, show_errors: bool = False
+) -> Optional[Ticket]:
     """Return a validated Ticket, or None if the model fails to produce one."""
     from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -109,6 +112,8 @@ def classify_complaint(complaint: str, previous_summaries: List[str], llm) -> Op
             if isinstance(ticket, Ticket):
                 return ticket
         except Exception as e:
-            # Log the error type only: the message may echo the student's complaint.
-            print(f"[classifier] attempt {attempt} failed: {type(e).__name__}")
+            # By default log the error type only: the message may echo the student's complaint.
+            # show_errors is for evals, where the complaints are synthetic.
+            detail = f": {e}" if show_errors else ""
+            print(f"[classifier] attempt {attempt} failed: {type(e).__name__}{detail}")
     return None

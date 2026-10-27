@@ -52,3 +52,16 @@ def test_rejected_message_needs_no_fields():
 def test_unknown_category_is_rejected():
     with pytest.raises(ValidationError):
         Ticket(is_hostel_related=True, category="weather", urgency="low", summary="x")
+
+
+def test_empty_model_env_var_falls_back_to_default(monkeypatch):
+    from classifier import DEFAULT_MODEL, make_llm
+
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.setenv("GROQ_MODEL", "")
+    assert make_llm().model_name == DEFAULT_MODEL
+
+
+def test_errors_show_type_only_by_default(capsys):
+    classify_complaint("my room 12 fan", [], FakeLLM([ValueError("my room 12 fan")] * MAX_ATTEMPTS))
+    assert "my room 12 fan" not in capsys.readouterr().out

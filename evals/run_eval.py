@@ -18,13 +18,45 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from classifier import DEFAULT_MODEL, classify_complaint, make_llm
+from classifier import DEFAULT_MODEL, Ticket, classify_complaint, make_llm
 
 EVAL_DIR = Path(__file__).parent
 CASES_FILE = EVAL_DIR / "complaints.jsonl"
 RESULTS_DIR = EVAL_DIR / "results"
 
 LOCATION_STOPWORDS = {"the", "of", "in", "at", "near", "outside", "on", "a", "an", "and"}
+
+PREFLIGHT_HINTS = """Common causes:
+- AuthenticationError: GROQ_API_KEY in .env is missing, mistyped or revoked.
+- NotFoundError, or a 400 saying the model is decommissioned: pick a current model from
+  https://console.groq.com/docs/models and pass it with --model or GROQ_MODEL.
+- BadRequestError mentioning tools: this model does not support tool calling; try another.
+- RateLimitError: wait a minute and run again, or use --limit."""
+
+
+def preflight(llm) -> bool:
+    """
+    Make one call before the run. A bad key or a retired model then fails once,
+    with the provider's real message, instead of as 55 empty results.
+    """
+    from langchain_core.messages import HumanMessage
+
+    try:
+        llm.with_structured_output(Ticket).invoke([HumanMessage(content="The fan in room 101 is broken.")])
+        return True
+    except Exception as e:
+        print(f"Preflight call failed. {type(e).__name__}: {e}\n")
+        print(PREFLIGHT_HINTS)
+        return False
+
+
+def rate(numerator, denominator):
+    """A ratio, or None when there is nothing to measure."""
+    return numerator / denominator if denominator else None
+
+
+def percent(value):
+    return "n/a" if value is None else f"{value:.0%}"
 
 
 def load_cases(path=CASES_FILE):
@@ -92,8 +124,8 @@ def summarize(results):
     tp = sum(1 for r in produced if r["expected"]["is_hostel_related"] and r["ticket"]["is_hostel_related"])
     fp = sum(1 for r in produced if not r["expected"]["is_hostel_related"] and r["ticket"]["is_hostel_related"])
     fn = sum(1 for r in produced if r["expected"]["is_hostel_related"] and not r["ticket"]["is_hostel_related"])
-    precision = tp / (tp + fp) if tp + fp else 0.0
-    recall = tp / (tp + fn) if tp + fn else 0.0
+    precision = rate(tp, tp + fp)
+    recall = rate(tp, tp + fn)
 
     latencies = sorted(r["latency_s"] for r in results)
     return {
@@ -120,9 +152,9 @@ def render_report(model, results, summary):
         lines.append(f"| {name} | {ok}/{seen} | {ok / seen:.0%} |")
     lines += [
         "",
-        f"- Accept precision: {summary['accept_precision']:.0%} "
+        f"- Accept precision: {percent(summary['accept_precision'])} "
         f"(false accepts: {summary['false_accepts']})",
-        f"- Accept recall: {summary['accept_recall']:.0%} (false rejects: {summary['false_rejects']})",
+        f"- Accept recall: {percent(summary['accept_recall'])} (false rejects: {summary['false_rejects']})",
         f"- Latency p50: {summary['latency_p50_s']:.2f}s, p95: {summary['latency_p95_s']:.2f}s",
         "",
         "## Failures",
@@ -141,6 +173,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", default=None, help=f"Groq model id (default: GROQ_MODEL or {DEFAULT_MODEL})")
     parser.add_argument("--limit", type=int, default=None, help="Only run the first N cases")
+    parser.add_argument("--show-errors", action="store_true", help="Print full provider error messages")
     args = parser.parse_args()
 
     load_dotenv()
@@ -148,10 +181,13 @@ def main():
     model = llm.model_name
     cases = load_cases()[: args.limit]
 
+    if not preflight(llm):
+        raise SystemExit(1)
+
     results = []
     for case in cases:
         start = time.perf_counter()
-        ticket = classify_complaint(case["complaint"], case.get("history", []), llm)
+        ticket = classify_complaint(case["complaint"], case.get("history", []), llm, args.show_errors)
         latency = time.perf_counter() - start
         checks = score_case(case, ticket)
         results.append({

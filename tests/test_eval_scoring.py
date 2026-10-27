@@ -57,3 +57,18 @@ def test_dataset_labels_use_valid_values():
         for field, allowed in (("category", get_args(Category)), ("urgency", get_args(Urgency))):
             values = expected[field] if isinstance(expected[field], list) else [expected[field]]
             assert set(values) <= set(allowed), (case["id"], field)
+
+
+def test_preflight_reports_provider_errors(capsys):
+    from evals.run_eval import preflight
+    from tests.fakes import FakeLLM
+
+    assert preflight(FakeLLM([PermissionError("Invalid API Key")])) is False
+    out = capsys.readouterr().out
+    assert "PermissionError: Invalid API Key" in out
+    assert "GROQ_API_KEY" in out
+
+
+def test_rates_are_not_applicable_when_nothing_was_classified():
+    summary = summarize([{"expected": {"is_hostel_related": True}, "ticket": None, "checks": {}, "latency_s": 0.1}])
+    assert summary["accept_precision"] is None and summary["accept_recall"] is None
